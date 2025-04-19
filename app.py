@@ -340,32 +340,79 @@ def main():
     )
     print(f"Found {linkedin_count} LinkedIn URLs ({linkedin_count/total_participants*100:.1f}% of participants)")
 
-# Function to create a beautifully formatted CSV
 def get_formatted_csv(df):
-    # Create a CSV string with headers and formatting
-    csv_string = "Hidevs Internship Work - BHIVE Events Data\n"
-    csv_string += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    csv_string += f"Total Records: {len(df)}\n"
-    csv_string += "Source: https://lu.ma/START_by_BHIVE\n\n"
+    """
+    Create a beautifully formatted CSV file from the DataFrame
+    
+    Args:
+        df (DataFrame): Pandas DataFrame containing the event data
+        
+    Returns:
+        bytes: Encoded CSV data
+    """
+    # Create a CSV string with proper headers and metadata
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    csv_string = f"# Hidevs Internship Work - BHIVE Events Data\n"
+    csv_string += f"# Extraction Date: {current_time}\n"
+    csv_string += f"# Total Records: {len(df)}\n"
+    csv_string += f"# Source: https://lu.ma/START_by_BHIVE\n"
+    csv_string += f"# Format: CSV Version 1.0\n"
+    csv_string += f"# -------------------------------------------------\n\n"
     
     # Clean the data before export
     clean_df = df.copy()
     
-    # Clean and standardize LinkedIn URLs
-    clean_df['LinkedIn Profile URL'] = clean_df['LinkedIn Profile URL'].apply(
-        lambda x: x if pd.notnull(x) and x.strip() != "" else "Not Available"
-    )
-    
-    # Clean event names and host names
-    clean_df['Event Name'] = clean_df['Event Name'].str.strip()
-    clean_df['Host Name'] = clean_df['Host Name'].str.strip()
-    
     # Add sequence numbers for better readability
     clean_df.insert(0, 'No.', range(1, len(clean_df) + 1))
+    
+    # Clean and standardize LinkedIn URLs
+    if 'LinkedIn Profile URL' in clean_df.columns:
+        clean_df['LinkedIn Profile URL'] = clean_df['LinkedIn Profile URL'].apply(
+            lambda x: x if pd.notnull(x) and x.strip() != "" else "Not Available"
+        )
+    elif 'linkedin_url' in clean_df.columns:
+        clean_df['linkedin_url'] = clean_df['linkedin_url'].apply(
+            lambda x: x if pd.notnull(x) and x.strip() != "" else "Not Available"
+        )
+    
+    # Clean event names and participant names
+    for name_col in ['Event Name', 'event_name', 'participant_name', 'Host Name', 'name']:
+        if name_col in clean_df.columns:
+            clean_df[name_col] = clean_df[name_col].astype(str).str.strip()
+    
+    # Format date columns if they exist
+    date_cols = ['event_date', 'Event Date']
+    for date_col in date_cols:
+        if date_col in clean_df.columns:
+            try:
+                clean_df[date_col] = pd.to_datetime(clean_df[date_col], errors='ignore')
+                clean_df[date_col] = clean_df[date_col].dt.strftime('%Y-%m-%d')
+            except:
+                pass  # If conversion fails, keep as is
     
     # Export to CSV with proper formatting
     csv_string += clean_df.to_csv(index=False)
     return csv_string.encode('utf-8')
+
+def save_formatted_csv(df, filename="bhive_events_data.csv"):
+    """
+    Save data to a nicely formatted CSV file
+    
+    Args:
+        df (DataFrame): Pandas DataFrame to save
+        filename (str): Output filename
+    """
+    # Get the CSV content
+    csv_content = get_formatted_csv(df)
+    
+    # Write to file
+    with open(filename, 'wb') as f:
+        f.write(csv_content)
+    
+    print(f"\nFormatted data saved to {filename}")
+    
+    # Return the path to the saved file
+    return os.path.abspath(filename)
 
 if __name__ == "__main__":
     main()
