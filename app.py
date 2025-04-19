@@ -2,337 +2,439 @@ import pandas as pd
 import streamlit as st
 import base64
 from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+import time
+import logging
+import re
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
 
 # Set page configuration
 st.set_page_config(
-    page_title="Hidevs Internship Work",
+    page_title="BHIVE Events Scraper",
     page_icon="✨",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Apply enhanced modern CSS for better UI with improved contrast
+# Apply custom CSS for better UI
 st.markdown("""
 <style>
     /* Overall Page Styling */
     .main {
-        padding: 2.5rem;
-        background-color: #1e2a3a;
+        padding: 2rem;
+        background-color: #1a202c;
         color: white;
     }
     .stApp {
-        background-color: #1e2a3a;
+        background-color: #1a202c;
     }
     
     /* Typography */
     h1 {
         color: #ffffff;
         font-family: 'Segoe UI', Arial, sans-serif;
-        font-weight: 800;
-        font-size: 3rem;
+        font-weight: 700;
+        font-size: 2.5rem;
         margin-bottom: 1rem;
         text-align: center;
-        text-shadow: 0 2px 10px rgba(43, 155, 255, 0.3);
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #4299e1;
     }
     
     h2, h3 {
         color: #ffffff;
         font-family: 'Segoe UI', Arial, sans-serif;
         font-weight: 600;
-        margin-top: 1.5rem;
     }
     
     p {
         font-family: 'Segoe UI', Arial, sans-serif;
         line-height: 1.6;
-        color: #e6e6e6;
-        font-size: 1.1rem;
+        color: #e2e8f0;
     }
     
-    /* Components Styling */
+    /* Components */
     .stButton>button {
-        background: linear-gradient(90deg, #2563eb 0%, #3b82f6 100%);
+        background-color: #4299e1;
         color: white;
-        border-radius: 8px;
-        padding: 0.6rem 1.5rem;
         font-weight: bold;
         border: none;
-        box-shadow: 0 4px 10px rgba(59, 130, 246, 0.3);
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
         transition: all 0.3s ease;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        font-size: 0.9rem;
     }
     
     .stButton>button:hover {
-        background: linear-gradient(90deg, #1d4ed8 0%, #2563eb 100%);
-        transform: translateY(-3px);
-        box-shadow: 0 7px 14px rgba(59, 130, 246, 0.4);
+        background-color: #3182ce;
+        box-shadow: 0 0 15px rgba(66, 153, 225, 0.5);
     }
     
-    /* DataTable Styling */
-    .stDataFrame {
-        border-radius: 12px;
-        overflow: hidden;
-        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+    /* Status messages */
+    .stAlert {
+        background-color: #2d3748;
+        color: white;
+        border: none;
+        border-left: 4px solid;
     }
     
-    [data-testid="stDataFrame"] table {
-        width: 100%;
-        border-collapse: separate;
-        border-spacing: 0;
+    .stAlert.success {
+        border-left-color: #48bb78;
     }
     
-    [data-testid="stDataFrame"] th {
-        background-color: #3b82f6 !important;
-        color: white !important;
-        padding: 12px 15px !important;
-        font-weight: 600 !important;
-        text-align: left !important;
-        font-size: 14px !important;
-        border: none !important;
+    .stAlert.warning {
+        border-left-color: #ed8936;
     }
     
-    [data-testid="stDataFrame"] td {
-        padding: 12px 15px !important;
-        border: none !important;
-        font-size: 14px !important;
-        color: #333 !important;
+    .stAlert.error {
+        border-left-color: #f56565;
     }
     
-    [data-testid="stDataFrame"] tr:nth-child(even) {
-        background-color: #f3f4f6 !important;
-    }
-    
-    [data-testid="stDataFrame"] tr:nth-child(odd) {
-        background-color: #ffffff !important;
-    }
-    
-    [data-testid="stDataFrame"] tr:hover {
-        background-color: #e5edff !important;
-    }
-    
+    /* Input fields */
     .stTextInput>div>div>input {
-        border-radius: 8px;
-        padding: 12px 20px;
-        border: 2px solid #3b82f6;
-        box-shadow: 0 2px 8px rgba(59, 130, 246, 0.2);
-        background-color: #ffffff;
-        color: #333;
-        font-size: 1rem;
+        background-color: #2d3748;
+        color: white;
+        border: 1px solid #4a5568;
+        border-radius: 0.375rem;
     }
     
     .stTextInput>div>div>input:focus {
-        border-color: #2563eb;
-        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4);
+        border-color: #4299e1;
+        box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.3);
     }
     
-    .stTextInput>label {
-        color: #ffffff !important;
+    /* DataFrame */
+    [data-testid="stDataFrame"] table {
+        width: 100%;
+    }
+    
+    [data-testid="stDataFrame"] th {
+        background-color: #2d3748 !important;
+        color: white !important;
         font-weight: 600 !important;
-        font-size: 1rem !important;
+        text-align: left !important;
+        padding: 0.75rem 1rem !important;
+        border-bottom: 2px solid #4299e1 !important;
     }
     
-    /* Custom Cards */
+    [data-testid="stDataFrame"] td {
+        padding: 0.75rem 1rem !important;
+        border-bottom: 1px solid #4a5568 !important;
+        color: #e2e8f0 !important;
+    }
+    
+    [data-testid="stDataFrame"] tr:nth-child(even) {
+        background-color: #2d3748 !important;
+    }
+    
+    [data-testid="stDataFrame"] tr:nth-child(odd) {
+        background-color: #1a202c !important;
+    }
+    
+    /* Container for sections */
     .container {
         background-color: #2d3748;
-        border-radius: 16px;
-        padding: 2rem;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-        border-left: 5px solid #3b82f6;
-    }
-    
-    .info-card {
-        background-color: #2d3748;
-        border-radius: 12px;
-        padding: 1.8rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
-        border-left: 5px solid #3b82f6;
-        transition: transform 0.3s ease, box-shadow 0.3s ease;
-    }
-    
-    .info-card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
-    }
-    
-    /* Search styling */
-    .search-container {
-        background-color: #2d3748;
-        border-radius: 12px;
+        border-radius: 0.5rem;
         padding: 1.5rem;
         margin-bottom: 1.5rem;
-        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        border-left: 4px solid #4299e1;
     }
     
-    /* Custom download button */
+    /* Download button */
     .download-btn {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        background: linear-gradient(90deg, #2563eb 0%, #3b82f6 100%);
+        background-color: #4299e1;
         color: white;
-        padding: 12px 24px;
-        border-radius: 8px;
+        padding: 0.75rem 1.5rem;
+        border-radius: 0.375rem;
         font-weight: 600;
         text-decoration: none;
-        box-shadow: 0 6px 15px rgba(59, 130, 246, 0.3);
         transition: all 0.3s ease;
         margin-top: 1rem;
-        width: 200px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
     
     .download-btn:hover {
-        background: linear-gradient(90deg, #1d4ed8 0%, #2563eb 100%);
-        transform: translateY(-3px);
-        box-shadow: 0 10px 20px rgba(59, 130, 246, 0.4);
+        background-color: #3182ce;
+        transform: translateY(-2px);
+        box-shadow: 0 6px 10px rgba(0, 0, 0, 0.2);
     }
     
-    /* Dividers */
-    hr {
-        margin: 2rem 0;
-        border: none;
-        height: 1px;
-        background: linear-gradient(90deg, rgba(59,130,246,0), rgba(59,130,246,0.5) 50%, rgba(59,130,246,0) 100%);
+    /* Progress indicators */
+    .stProgress > div > div > div > div {
+        background-color: #4299e1;
     }
     
-    /* Footer styling */
+    /* Footer */
     .footer {
         text-align: center;
         padding: 1rem;
-        color: #e6e6e6;
-        font-size: 0.9rem;
         margin-top: 2rem;
+        color: #a0aec0;
+        font-size: 0.875rem;
+        border-top: 1px solid #2d3748;
     }
     
-    /* App header design */
-    .app-header {
-        text-align: center;
-        padding-bottom: 1.5rem;
-        margin-bottom: 2rem;
-        border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+    /* Divider */
+    hr {
+        border: none;
+        border-top: 1px solid #2d3748;
+        margin: 1.5rem 0;
     }
     
-    /* Highlight styling */
-    .highlight {
-        color: #60a5fa;
-        font-weight: 600;
-    }
-    
-    /* Icon styling */
-    .icon {
-        color: #60a5fa;
-        font-size: 1.2em;
-        margin-right: 0.5rem;
+    /* Info box */
+    .info-box {
+        background-color: #2d3748;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        border-left: 4px solid #4299e1;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Static event data without Date and Location
-def extract_event_data():
-    sample_data = [
-        {
-            "Event Name": "Workshop: Mastering Contextual Leadership: The Art of Playing Multiple Personas",
-            "Host Name": "Ravindra M.K, Vijetha & Nikhita Habib",
-            "LinkedIn Profile URL": "https://www.linkedin.com/company/bhive-workspace"
-        },
-        {
-            "Event Name": "Ai Day for startups",
-            "Host Name": "Ravindra M.K & Vijetha",
-            "LinkedIn Profile URL": "https://www.linkedin.com/company/bhive-workspace"
-        },
-        {
-            "Event Name": "New Experiment for CHROs: AI Agents",
-            "Host Name": "Waqar Ahmed & Ravindra M.K",
-            "LinkedIn Profile URL": "https://www.linkedin.com/company/bhive-workspace"
-        },
-        {
-            "Event Name": "Money Meets Tech - Lessons in Building Wealth & Fintech Products",
-            "Host Name": "Women in Product India, Ravindra M.K, Vijetha",
-            "LinkedIn Profile URL": "https://www.linkedin.com/company/wip-india/"
-        },
-        {
-            "Event Name": "Build your Mocks with No-Code AI Tools",
-            "Host Name": "Ravindra M.K & Vijetha",
-            "LinkedIn Profile URL": "https://www.linkedin.com/company/bhive-workspace/"
-        },
-        {
-            "Event Name": "How to get Ranked #1 on Product Hunt",
-            "Host Name": "Ravindra M.K & Vijetha",
-            "LinkedIn Profile URL": "https://www.linkedin.com/company/bhive-workspace/"
-        }
-    ]
-    return pd.DataFrame(sample_data)
+# Function to scrape BHIVE events data
+@st.cache_data(show_spinner=False, ttl=1800)
+def scrape_bhive_events(url="https://lu.ma/START_by_BHIVE"):
+    logger.info(f"Starting scrape of {url}")
+    # Set up Chrome options
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+    
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.set_page_load_timeout(30)
+    except WebDriverException as e:
+        logger.error(f"Failed to initialize Chrome driver: {e}")
+        st.error("Failed to initialize Chrome driver. Please ensure Chrome is installed.")
+        return pd.DataFrame()
+    
+    events_data = []
+    
+    try:
+        # Load main page
+        logger.info(f"Loading main page: {url}")
+        driver.get(url)
+        
+        # Wait for page to load
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/event/']"))
+        )
+        
+        # Parse the main page
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        # Find all event links
+        event_links = soup.select("a[href*='/event/']")
+        logger.info(f"Found {len(event_links)} event links")
+        
+        if not event_links:
+            logger.warning("No event links found on the page")
+            return pd.DataFrame()
+            
+        # Process each event
+        total_events = len(event_links)
+        for index, link in enumerate(event_links, 1):
+            event_url = urljoin("https://lu.ma", link['href'])
+            st.progress(index/total_events, text=f"Processing event {index}/{total_events}")
+            logger.info(f"Processing event {index}/{total_events}: {event_url}")
+            
+            try:
+                # Get event title from the link
+                event_title_elem = link.select_one('h3, div[class*="title"], span[class*="name"]')
+                event_title = event_title_elem.get_text(strip=True) if event_title_elem else "Unknown Event"
+                
+                # Load event page
+                driver.get(event_url)
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                )
+                
+                # Parse event page
+                event_soup = BeautifulSoup(driver.page_source, 'html.parser')
+                
+                # Try to get event title from event page if not found on listing
+                if event_title == "Unknown Event":
+                    event_title_elem = event_soup.select_one('h1, div[class*="title"]')
+                    if event_title_elem:
+                        event_title = event_title_elem.get_text(strip=True)
+                
+                # Find host section
+                host_section = event_soup.select_one('div[class*="creator"], div[class*="host"], div:contains("Hosted by")')
+                
+                if not host_section:
+                    # Try alternative methods to find host links
+                    host_links = event_soup.select('a[href*="/u/"], a[href*="/p/"]')
+                else:
+                    # Get host links from host section
+                    host_links = host_section.select('a[href*="/u/"], a[href*="/p/"]')
+                
+                if not host_links:
+                    # If no host found, add event with empty host
+                    logger.warning(f"No hosts found for event: {event_title}")
+                    events_data.append({
+                        "Event Name": event_title,
+                        "Host Name": "Unknown",
+                        "LinkedIn Profile URL": ""
+                    })
+                    continue
+                
+                # Process each host
+                for host_link in host_links:
+                    host_url = urljoin("https://lu.ma", host_link['href'])
+                    
+                    try:
+                        # Get host name from link
+                        host_name_elem = host_link.select_one('span, div')
+                        host_name = host_name_elem.get_text(strip=True) if host_name_elem else "Unknown Host"
+                        
+                        # Load host profile page
+                        driver.get(host_url)
+                        WebDriverWait(driver, 15).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                        )
+                        
+                        # Parse host page
+                        host_soup = BeautifulSoup(driver.page_source, 'html.parser')
+                        
+                        # Try to get host name from profile page if not found
+                        if host_name == "Unknown Host":
+                            host_name_elem = host_soup.select_one('h1, div[class*="name"]')
+                            if host_name_elem:
+                                host_name = host_name_elem.get_text(strip=True)
+                        
+                        # Find LinkedIn URL
+                        linkedin_url = ""
+                        # Look for LinkedIn link
+                        linkedin_links = host_soup.select('a[href*="linkedin.com"]')
+                        if linkedin_links:
+                            linkedin_url = linkedin_links[0]['href']
+                        
+                        # Add to dataset
+                        events_data.append({
+                            "Event Name": event_title,
+                            "Host Name": host_name,
+                            "LinkedIn Profile URL": linkedin_url
+                        })
+                        logger.info(f"Added host: {host_name} for event: {event_title}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing host {host_url}: {str(e)}")
+                        
+                    # Prevent rate limiting
+                    time.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"Error processing event {event_url}: {str(e)}")
+            
+            # Prevent rate limiting
+            time.sleep(2)
+            
+        # Return the collected data
+        return pd.DataFrame(events_data)
+        
+    except Exception as e:
+        logger.error(f"Scraping failed: {str(e)}")
+        st.error(f"Scraping failed: {str(e)}")
+        return pd.DataFrame()
+        
+    finally:
+        driver.quit()
 
-# Function to create a beautifully formatted CSV with a title
+# Function to create a beautifully formatted CSV
 def get_formatted_csv(df):
-    # Create a CSV string with a title and well-formatted headers
-    csv_string = "Hidevs Internship Work\n\n"
+    # Create a CSV string with headers and formatting
+    csv_string = "Hidevs Internship Work - BHIVE Events Data\n"
+    csv_string += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     csv_string += df.to_csv(index=False)
     return csv_string.encode('utf-8')
 
-# Function to create a download link with custom styling
+# Function to create a download link
 def get_download_link(csv):
     b64 = base64.b64encode(csv).decode()
     current_date = datetime.now().strftime("%Y-%m-%d")
-    download_filename = f"hidevs_internship_data_{current_date}.csv"
-    href = f'<a href="data:file/csv;base64,{b64}" download="{download_filename}" class="download-btn"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:10px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Download CSV</a>'
+    download_filename = f"bhive_events_data_{current_date}.csv"
+    href = f'<a href="data:file/csv;base64,{b64}" download="{download_filename}" class="download-btn"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Download CSV</a>'
     return href
 
-# Main App
+# Main app
 def main():
-    # Header with beautiful typography and icons
-    st.markdown('<div class="app-header">', unsafe_allow_html=True)
-    st.markdown('<h1>✨ Hidevs Internship Work ✨</h1>', unsafe_allow_html=True)
+    # Header
+    st.markdown("<h1>BHIVE Events Data Extractor</h1>", unsafe_allow_html=True)
+    
+    # Information section
+    st.markdown('<div class="info-box">', unsafe_allow_html=True)
+    st.markdown("""
+    <p>This tool extracts information from BHIVE events on Lu.ma, including:</p>
+    <ul>
+        <li>Event Name</li>
+        <li>Host Name</li>
+        <li>LinkedIn Profile URL of Host</li>
+    </ul>
+    <p>The tool is pre-configured to scrape from <a href="https://lu.ma/START_by_BHIVE" target="_blank">https://lu.ma/START_by_BHIVE</a></p>
+    """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # Information Card
-    st.markdown('<div class="info-card">', unsafe_allow_html=True)
-    st.markdown('<h3 style="margin-top:0;"><span class="icon">📊</span> Event & Host Details</h3>', unsafe_allow_html=True)
-    st.markdown('<p>This dataset contains information about various events hosted by <span class="highlight">Hidevs</span>.</p>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Optional custom URL input
+    use_custom_url = st.checkbox("Use a different Lu.ma URL")
     
-    # Get data
-    df = extract_event_data()
-    
-    # Add search functionality with improved styling
-    st.markdown('<div class="search-container">', unsafe_allow_html=True)
-    search_term = st.text_input("🔍 Search Events", placeholder="Type to filter events...")
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Filter dataframe based on search
-    if search_term:
-        filtered_df = df[df.apply(lambda row: row.astype(str).str.contains(search_term, case=False).any(), axis=1)]
+    if use_custom_url:
+        url = st.text_input("Enter Lu.ma URL:", value="https://lu.ma/START_by_BHIVE")
     else:
-        filtered_df = df
-        
-    # Display the dataframe with better styling
-    st.dataframe(
-        filtered_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Event Name": st.column_config.TextColumn("Event Name", width="large"),
-            "Host Name": st.column_config.TextColumn("Host Name", width="medium"),
-            "LinkedIn Profile URL": st.column_config.LinkColumn("LinkedIn", width="medium", display_text="View Profile"),
-        }
-    )
+        url = "https://lu.ma/START_by_BHIVE"
     
-    # Download section with improved styling
-    st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown('<div class="container">', unsafe_allow_html=True)
-    st.markdown('<h3 style="margin-top:0;"><span class="icon">📥</span>Download Dataset</h3>', unsafe_allow_html=True)
-    
-    # Create formatted CSV
-    csv = get_formatted_csv(df)
-    
-    # Display download button with custom styling
-    st.markdown('<div style="display:flex; justify-content:center;">', unsafe_allow_html=True)
-    st.markdown(get_download_link(csv), unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Scrape button
+    if st.button("🚀 Extract BHIVE Events Data"):
+        with st.spinner("Extracting data from BHIVE events..."):
+            df = scrape_bhive_events(url)
+            
+            if not df.empty:
+                st.success(f"✅ Successfully extracted data for {len(df)} host entries from BHIVE events!")
+                
+                # Display the data
+                st.markdown("<h3>Extracted Event and Host Data</h3>", unsafe_allow_html=True)
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Event Name": st.column_config.TextColumn("Event Name", width="large"),
+                        "Host Name": st.column_config.TextColumn("Host Name", width="medium"),
+                        "LinkedIn Profile URL": st.column_config.LinkColumn("LinkedIn Profile", width="medium", display_text="View Profile"),
+                    }
+                )
+                
+                # Download section
+                st.markdown("<hr>", unsafe_allow_html=True)
+                st.markdown('<div class="container">', unsafe_allow_html=True)
+                st.markdown("<h3>Download the Data</h3>", unsafe_allow_html=True)
+                st.markdown("<p>Download the complete dataset in CSV format with proper formatting and title.</p>", unsafe_allow_html=True)
+                
+                # Create formatted CSV and download button
+                csv = get_formatted_csv(df)
+                st.markdown('<div style="display:flex; justify-content:center;">', unsafe_allow_html=True)
+                st.markdown(get_download_link(csv), unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+            else:
+                st.warning("No data found. Please check if the URL is correct or try again later.")
     
     # Footer
     st.markdown("<hr>", unsafe_allow_html=True)
