@@ -4,6 +4,8 @@ import base64
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -218,11 +220,14 @@ def scrape_bhive_events(url="https://lu.ma/START_by_BHIVE"):
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
     try:
-        driver = webdriver.Chrome(options=chrome_options)
+        # Use webdriver_manager to handle Chrome driver installation
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(30)
-    except WebDriverException as e:
+        st.success("Chrome driver initialized successfully!")
+    except Exception as e:
         logger.error(f"Failed to initialize Chrome driver: {e}")
-        st.error("Failed to initialize Chrome driver. Please ensure Chrome is installed.")
+        st.error(f"Failed to initialize Chrome driver: {str(e)}")
         return pd.DataFrame()
     
     events_data = []
@@ -230,26 +235,57 @@ def scrape_bhive_events(url="https://lu.ma/START_by_BHIVE"):
     try:
         # Load main page
         logger.info(f"Loading main page: {url}")
-        driver.get(url)
+        st.info(f"Loading events from {url}")
         
-        # Wait for page to load
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/event/']"))
-        )
+        # Add a retry mechanism for loading the initial page
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                driver.get(url)
+                # Wait for page to load
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                )
+                st.success("Page loaded successfully!")
+                break
+            except (TimeoutException, WebDriverException) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Retry {attempt+1}/{max_retries} for loading {url}: {e}")
+                    st.warning(f"Retry {attempt+1}/{max_retries} for loading page...")
+                    time.sleep(3)
+                else:
+                    logger.error(f"Failed to load {url} after {max_retries} retries: {e}")
+                    st.error(f"Failed to load page after {max_retries} retries.")
+                    return pd.DataFrame()
         
         # Parse the main page
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # Find all event links
+        # Find all event links - try multiple selector patterns
         event_links = soup.select("a[href*='/event/']")
+        if not event_links:
+            # Try alternative selectors
+            event_links = soup.select("a[href*='lu.ma/e/']")
+        
         logger.info(f"Found {len(event_links)} event links")
         
         if not event_links:
-            logger.warning("No event links found on the page")
+            # Take a screenshot to debug
+            driver.save_screenshot("page_source.png")
+            logger.warning("No event links found on the page. Page source saved for debugging.")
+            
+            # Dump HTML for debugging
+            with open("page_source.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            
+            st.warning("No event links found. This could be due to changes in the page structure or the page might be protected.")
+            st.info("Consider manually checking the URL to ensure events are available.")
             return pd.DataFrame()
             
         # Process each event
         total_events = len(event_links)
+        st.info(f"Found {total_events} events to process")
+        
         for index, link in enumerate(event_links, 1):
             event_url = urljoin("https://lu.ma", link['href'])
             st.progress(index/total_events, text=f"Processing event {index}/{total_events}")
@@ -257,7 +293,7 @@ def scrape_bhive_events(url="https://lu.ma/START_by_BHIVE"):
             
             try:
                 # Get event title from the link
-                event_title_elem = link.select_one('h3, div[class*="title"], span[class*="name"]')
+                event_title_elem = link.select_one('h3, div[class*="title"], span[class*="name"], [class*="event"]')
                 event_title = event_title_elem.get_text(strip=True) if event_title_elem else "Unknown Event"
                 
                 # Load event page
@@ -271,12 +307,12 @@ def scrape_bhive_events(url="https://lu.ma/START_by_BHIVE"):
                 
                 # Try to get event title from event page if not found on listing
                 if event_title == "Unknown Event":
-                    event_title_elem = event_soup.select_one('h1, div[class*="title"]')
+                    event_title_elem = event_soup.select_one('h1, div[class*="title"], [class*="event-title"]')
                     if event_title_elem:
                         event_title = event_title_elem.get_text(strip=True)
                 
-                # Find host section
-                host_section = event_soup.select_one('div[class*="creator"], div[class*="host"], div:contains("Hosted by")')
+                # Find host section - try multiple approaches
+                host_section = event_soup.select_one('div[class*="creator"], div[class*="host"], section:contains("Hosted by")')
                 
                 if not host_section:
                     # Try alternative methods to find host links
@@ -315,7 +351,7 @@ def scrape_bhive_events(url="https://lu.ma/START_by_BHIVE"):
                         
                         # Try to get host name from profile page if not found
                         if host_name == "Unknown Host":
-                            host_name_elem = host_soup.select_one('h1, div[class*="name"]')
+                            host_name_elem = host_soup.select_one('h1, div[class*="name"], div[class*="title"]')
                             if host_name_elem:
                                 host_name = host_name_elem.get_text(strip=True)
                         
@@ -347,7 +383,12 @@ def scrape_bhive_events(url="https://lu.ma/START_by_BHIVE"):
             time.sleep(2)
             
         # Return the collected data
-        return pd.DataFrame(events_data)
+        if events_data:
+            st.success(f"Successfully extracted {len(events_data)} entries!")
+            return pd.DataFrame(events_data)
+        else:
+            st.warning("No data could be extracted from the events.")
+            return pd.DataFrame()
         
     except Exception as e:
         logger.error(f"Scraping failed: {str(e)}")
@@ -391,6 +432,20 @@ def main():
     """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
     
+    # Add a troubleshooting section
+    with st.expander("Troubleshooting & Help"):
+        st.markdown("""
+        ### Common Issues and Solutions
+        
+        - **Chrome Driver Error**: The app will attempt to install Chrome driver automatically. If it fails, ensure you have Google Chrome installed on your system.
+        
+        - **No Events Found**: The page structure might have changed or the URL might be incorrect. Try using a different Lu.ma URL with known events.
+        
+        - **Slow Processing**: Scraping takes time as the tool needs to visit each event and host page. Be patient during extraction.
+        
+        - **Data Not Complete**: Some LinkedIn profiles might not be found if they're not properly linked on the host's page.
+        """)
+    
     # Optional custom URL input
     use_custom_url = st.checkbox("Use a different Lu.ma URL")
     
@@ -401,12 +456,15 @@ def main():
     
     # Scrape button
     if st.button("🚀 Extract BHIVE Events Data"):
-        with st.spinner("Extracting data from BHIVE events..."):
+        try:
+            # Create a placeholder for real-time updates
+            status_placeholder = st.empty()
+            status_placeholder.info("Initializing scraper...")
+            
+            # Perform the scraping
             df = scrape_bhive_events(url)
             
             if not df.empty:
-                st.success(f"✅ Successfully extracted data for {len(df)} host entries from BHIVE events!")
-                
                 # Display the data
                 st.markdown("<h3>Extracted Event and Host Data</h3>", unsafe_allow_html=True)
                 st.dataframe(
@@ -434,7 +492,10 @@ def main():
                 st.markdown('</div>', unsafe_allow_html=True)
                 
             else:
-                st.warning("No data found. Please check if the URL is correct or try again later.")
+                st.warning("No data could be extracted. Please check if the URL is correct or try again later.")
+                
+        except Exception as e:
+            st.error(f"An error occurred during scraping: {str(e)}")
     
     # Footer
     st.markdown("<hr>", unsafe_allow_html=True)
