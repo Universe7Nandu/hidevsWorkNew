@@ -15,7 +15,7 @@ import io
 import logging
 from datetime import datetime
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging
@@ -125,7 +125,7 @@ def get_linkedin_url_from_luma_user(user_url, progress_text=None):
         
         # Try to get user name
         user_name = None
-        name_elem = soup.select_one('h1.text-2xl') or soup.select_one('h2.font-bold') or soup.select_one('h1') or soup.select_one('div[class*="name"]')
+        name_elem = soup.select_one('h1.text-2xl') or soup.select_one('h2.font-bold') or soup.select_one('h1') or soup.select_one('div.fw-medium.text-ellipses') or soup.select_one('div[class*="name"]')
         if name_elem:
             user_name = name_elem.text.strip()
         
@@ -137,6 +137,14 @@ def get_linkedin_url_from_luma_user(user_url, progress_text=None):
         for a_tag in soup.find_all('a'):
             href = a_tag.get('href', '')
             if linkedin_pattern.match(href):
+                linkedin_url = href
+                break
+        
+        # Also look for social links section specifically
+        social_links = soup.select('a.social-link') or soup.select('a[aria-label="LinkedIn"]') or soup.select('a[href*="linkedin.com"]')
+        for link in social_links:
+            href = link.get('href', '')
+            if 'linkedin.com' in href:
                 linkedin_url = href
                 break
         
@@ -184,15 +192,27 @@ def extract_event_links_from_calendar(url, progress_text=None):
         # Parse HTML content
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Find all event links
+        # Find all event links based on classes mentioned in the query
         event_links = []
-        event_pattern = re.compile(r'https?://(www\.)?lu\.ma/(?!user|u|p)[^\s"\'<>]+')
         
-        # Look in anchor tags
-        for a_tag in soup.find_all('a'):
-            href = a_tag.get('href', '')
-            if event_pattern.match(href) and '/user/' not in href and '/u/' not in href and '/p/' not in href:
-                event_links.append(href)
+        # Look for links with specific class structure first
+        event_links_elements = soup.select('a.event-link') or soup.select('a.content-link')
+        for element in event_links_elements:
+            href = element.get('href', '')
+            if href and href.startswith('/') and not href.startswith('/user/'):
+                # Convert relative URL to absolute
+                full_url = urljoin("https://lu.ma", href)
+                event_links.append(full_url)
+        
+        # If no specific class links found, try the generic pattern
+        if not event_links:
+            event_pattern = re.compile(r'^/[a-zA-Z0-9]+$')
+            for a_tag in soup.find_all('a'):
+                href = a_tag.get('href', '')
+                if href and event_pattern.match(href) and '/user/' not in href and '/u/' not in href:
+                    # Convert relative URL to absolute
+                    full_url = urljoin("https://lu.ma", href)
+                    event_links.append(full_url)
         
         # Remove duplicates
         event_links = list(set(event_links))
@@ -265,26 +285,47 @@ def extract_event_data(url, progress_bar=None, progress_text=None):
         if progress_text:
             progress_text.text("Searching for participant profiles...")
         
-        # Extract participant information - patterns for user profiles
-        user_patterns = [
-            re.compile(r'https?://(www\.)?lu\.ma/user/[^\s"\'<>]+'),
-            re.compile(r'https?://(www\.)?lu\.ma/u/[^\s"\'<>]+'),
-            re.compile(r'https?://(www\.)?lu\.ma/p/[^\s"\'<>]+')
-        ]
-        
+        # Look for host profile links with the specific class structure
         user_links = set()  # Use a set to avoid duplicates
         
-        # Search with each pattern
-        for pattern in user_patterns:
-            # Find all links in the page
-            for a_tag in soup.find_all('a'):
-                href = a_tag.get('href', '')
-                if pattern.match(href):
-                    user_links.add(href)
+        # Look for links with the specific class mentioned in the query
+        host_links = soup.select('a.host-row') or soup.select('a.lux-menu-trigger-wrapper')
+        for a_tag in host_links:
+            href = a_tag.get('href', '')
+            if href and href.startswith('/user/'):
+                # Convert relative URL to absolute
+                full_url = urljoin("https://lu.ma", href)
+                user_links.add(full_url)
+        
+        # If no specific links found, try the generic patterns as fallback
+        if not user_links:
+            # Extract participant information - patterns for user profiles
+            user_patterns = [
+                re.compile(r'https?://(www\.)?lu\.ma/user/[^\s"\'<>]+'),
+                re.compile(r'https?://(www\.)?lu\.ma/u/[^\s"\'<>]+'),
+                re.compile(r'https?://(www\.)?lu\.ma/p/[^\s"\'<>]+')
+            ]
             
-            # Also search in the raw HTML for any user links that might not be in <a> tags
-            for match in pattern.finditer(content):
-                user_links.add(match.group(0))
+            # Search with each pattern
+            for pattern in user_patterns:
+                # Find all links in the page
+                for a_tag in soup.find_all('a'):
+                    href = a_tag.get('href', '')
+                    if pattern.match(href):
+                        user_links.add(href)
+                
+                # Also search in the raw HTML for any user links that might not be in <a> tags
+                for match in pattern.finditer(content):
+                    user_links.add(match.group(0))
+        
+        # Also look for relative profile links and convert them
+        relative_pattern = re.compile(r'^/user/[^\s"\'<>]+$')
+        for a_tag in soup.find_all('a'):
+            href = a_tag.get('href', '')
+            if relative_pattern.match(href):
+                # Convert relative URL to absolute
+                full_url = urljoin("https://lu.ma", href)
+                user_links.add(full_url)
         
         # Update participant count
         event_data["participant_count"] = len(user_links)
