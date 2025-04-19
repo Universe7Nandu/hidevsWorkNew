@@ -1,25 +1,29 @@
 """
-Streamlit UI for Lu.ma Event Data Extractor
--------------------------------------------
+Lu.ma Event Data Extractor for Streamlit
+----------------------------------------
 
-This application provides a web interface for the Lu.ma event data extractor,
-allowing users to extract and download event data from Lu.ma/START_by_BHIVE.
+This application extracts event data from Lu.ma/START_by_BHIVE,
+collecting event information and participant LinkedIn URLs.
 """
 
 import streamlit as st
 import pandas as pd
 import requests
 import base64
-import os
 import re
-import csv
-import json
 import io
+import logging
 from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # Set page configuration
 st.set_page_config(
@@ -35,8 +39,6 @@ st.markdown("""
     /* Overall Page Styling */
     .main {
         padding: 2rem;
-        background-color: #0e1117;
-        color: #f7f7f7;
     }
     
     /* Typography */
@@ -49,94 +51,21 @@ st.markdown("""
         border-bottom: 2px solid #4fc3f7;
     }
     
-    h2, h3 {
-        color: #4fc3f7;
-        font-weight: 600;
-    }
-    
-    /* Components */
-    .stButton > button {
-        background-color: #4fc3f7;
-        color: #0e1117;
-        font-weight: bold;
-        border: none;
-        padding: 0.5rem 1.5rem;
-        border-radius: 0.375rem;
-        transition: all 0.3s ease;
-    }
-    
-    .stButton > button:hover {
-        background-color: #29b6f6;
-        box-shadow: 0 0 15px rgba(79, 195, 247, 0.5);
-    }
-    
-    /* Text input */
-    .stTextInput > div > div > input {
-        background-color: #1e2130;
-        color: #f7f7f7;
-        border: 1px solid #4fc3f7;
-        border-radius: 0.375rem;
-    }
-    
-    /* Container styling */
-    .css-18e3th9 {
-        padding-top: 1rem;
-    }
-    
-    /* Results container */
-    .results-container {
-        background-color: #1e2130;
-        border-radius: 0.5rem;
-        padding: 1.5rem;
-        margin-top: 2rem;
-        border-left: 4px solid #4fc3f7;
-    }
-    
-    /* Progress bar */
-    .stProgress > div > div > div > div {
-        background-color: #4fc3f7;
-    }
-    
-    /* DataFrame styling */
-    [data-testid="stDataFrame"] {
-        background-color: #1e2130 !important;
-        border-radius: 0.5rem;
-        overflow: hidden;
-    }
-    
-    [data-testid="stDataFrame"] th {
-        background-color: #4fc3f7 !important;
-        color: #0e1117 !important;
-        font-weight: 600 !important;
-        text-align: left !important;
-        padding: 0.75rem 1rem !important;
-    }
-    
     /* Download button */
     .download-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
+        display: inline-block;
         background-color: #4fc3f7;
-        color: #0e1117;
+        color: #ffffff;
         padding: 0.75rem 1.5rem;
         border-radius: 0.375rem;
         font-weight: 600;
         text-decoration: none;
-        transition: all 0.3s ease;
         margin-top: 1rem;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    
-    .download-btn:hover {
-        background-color: #29b6f6;
-        transform: translateY(-2px);
-        box-shadow: 0 6px 10px rgba(0, 0, 0, 0.2);
     }
     
     /* Info box */
     .info-box {
-        background-color: #1e2130;
+        background-color: #f8f9fa;
         border-radius: 0.5rem;
         padding: 1.5rem;
         margin-bottom: 1.5rem;
@@ -146,16 +75,9 @@ st.markdown("""
     /* Footer */
     .footer {
         text-align: center;
-        color: #a0aec0;
         margin-top: 2rem;
         padding-top: 1rem;
-        border-top: 1px solid #2d3748;
-    }
-    
-    /* Expander */
-    .streamlit-expanderHeader {
-        font-weight: 600;
-        color: #4fc3f7;
+        border-top: 1px solid #e9ecef;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -164,20 +86,17 @@ st.markdown("""
 linkedin_cache = {}
 
 def clean_url(url):
-    """
-    Clean a URL by removing query parameters
-    """
+    """Clean a URL by removing query parameters"""
     parsed = urlparse(url)
-    # Keep only the path
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
-def get_linkedin_url_from_luma_user(user_url, progress_text):
+def get_linkedin_url_from_luma_user(user_url, progress_text=None):
     """
     Fetch the LinkedIn URL from a Lu.ma user profile page with caching
     
     Args:
         user_url (str): The Lu.ma user profile URL
-        progress_text: Streamlit text element for updates
+        progress_text: Optional Streamlit text element for updates
         
     Returns:
         dict: Dictionary with LinkedIn URL and user name
@@ -190,12 +109,14 @@ def get_linkedin_url_from_luma_user(user_url, progress_text):
         return linkedin_cache[clean_user_url]
     
     try:
-        progress_text.text(f"Fetching LinkedIn from: {clean_user_url}")
+        if progress_text:
+            progress_text.text(f"Fetching LinkedIn from: {clean_user_url}")
+        logger.info(f"Fetching URL: {clean_user_url}")
         
         # Make request to the user profile page
         response = requests.get(clean_user_url)
         if response.status_code != 200:
-            st.warning(f"Failed to fetch user profile: {clean_user_url} (Status: {response.status_code})")
+            logger.warning(f"Failed to fetch user profile: {clean_user_url} (Status: {response.status_code})")
             linkedin_cache[clean_user_url] = None
             return None
         
@@ -208,7 +129,7 @@ def get_linkedin_url_from_luma_user(user_url, progress_text):
         if name_elem:
             user_name = name_elem.text.strip()
         
-        # Look for LinkedIn links (regular expression pattern)
+        # Look for LinkedIn links
         linkedin_pattern = re.compile(r'https?://(www\.)?linkedin\.com/[^\s"\'<>]+')
         
         # First try to find LinkedIn links in anchor tags
@@ -234,30 +155,81 @@ def get_linkedin_url_from_luma_user(user_url, progress_text):
         return result
         
     except Exception as e:
-        st.error(f"Error fetching LinkedIn from {clean_user_url}: {str(e)}")
+        logger.error(f"Error fetching LinkedIn from {clean_user_url}: {str(e)}")
         linkedin_cache[clean_user_url] = None
         return None
 
-def extract_event_data(url, progress_bar, progress_text):
+def extract_event_links_from_calendar(url, progress_text=None):
+    """
+    Extract event links from a Lu.ma calendar page
+    
+    Args:
+        url (str): The calendar URL
+        progress_text: Optional Streamlit text element for updates
+        
+    Returns:
+        list: List of event URLs
+    """
+    try:
+        if progress_text:
+            progress_text.text(f"Fetching calendar page: {url}")
+        logger.info(f"Fetching URL: {url}")
+        
+        # Make request to the calendar page
+        response = requests.get(url)
+        if response.status_code != 200:
+            logger.warning(f"Failed to fetch calendar page: {url} (Status: {response.status_code})")
+            return []
+        
+        # Parse HTML content
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Find all event links
+        event_links = []
+        event_pattern = re.compile(r'https?://(www\.)?lu\.ma/(?!user|u|p)[^\s"\'<>]+')
+        
+        # Look in anchor tags
+        for a_tag in soup.find_all('a'):
+            href = a_tag.get('href', '')
+            if event_pattern.match(href) and '/user/' not in href and '/u/' not in href and '/p/' not in href:
+                event_links.append(href)
+        
+        # Remove duplicates
+        event_links = list(set(event_links))
+        
+        if progress_text:
+            progress_text.text(f"Found {len(event_links)} event links")
+        logger.info(f"Extracted {len(event_links)} event links")
+        
+        return event_links
+        
+    except Exception as e:
+        logger.error(f"Error extracting event links from {url}: {str(e)}")
+        return []
+
+def extract_event_data(url, progress_bar=None, progress_text=None):
     """
     Extract event details from a Lu.ma event URL
     
     Args:
         url (str): The event URL
-        progress_bar: Streamlit progress bar
-        progress_text: Streamlit text element for updates
+        progress_bar: Optional Streamlit progress bar
+        progress_text: Optional Streamlit text element for updates
         
     Returns:
         tuple: (event_data, participant_links)
     """
-    progress_text.text(f"Fetching event page: {url}")
-    progress_bar.progress(0.1)
+    if progress_text:
+        progress_text.text(f"Fetching event page: {url}")
+    if progress_bar:
+        progress_bar.progress(0.1)
+    logger.info(f"Fetching URL: {url}")
     
     try:
         # Fetch the event page
         response = requests.get(url)
         if response.status_code != 200:
-            st.error(f"Failed to fetch event page: {url} (Status: {response.status_code})")
+            logger.error(f"Failed to fetch event page: {url} (Status: {response.status_code})")
             return None, []
         
         content = response.text
@@ -278,7 +250,7 @@ def extract_event_data(url, progress_bar, progress_text):
         if event_name_elem:
             event_data["event_name"] = event_name_elem.text.strip()
         
-        # Extract event date (usually found in a time element or text with date format)
+        # Extract event date
         date_elem = soup.select_one('time') or soup.select_one('p:contains("202")')
         if date_elem:
             event_data["event_date"] = date_elem.text.strip()
@@ -288,8 +260,10 @@ def extract_event_data(url, progress_bar, progress_text):
         if desc_elem:
             event_data["event_description"] = desc_elem.text.strip()
         
-        progress_bar.progress(0.3)
-        progress_text.text("Searching for participant profiles...")
+        if progress_bar:
+            progress_bar.progress(0.3)
+        if progress_text:
+            progress_text.text("Searching for participant profiles...")
         
         # Extract participant information - patterns for user profiles
         user_patterns = [
@@ -315,23 +289,25 @@ def extract_event_data(url, progress_bar, progress_text):
         # Update participant count
         event_data["participant_count"] = len(user_links)
         
-        progress_bar.progress(0.5)
-        progress_text.text(f"Found {len(user_links)} participant profiles")
+        if progress_bar:
+            progress_bar.progress(0.5)
+        if progress_text:
+            progress_text.text(f"Found {len(user_links)} participant profiles")
         
         return event_data, user_links
         
     except Exception as e:
-        st.error(f"Error extracting event data from {url}: {str(e)}")
+        logger.error(f"Error extracting event data from {url}: {str(e)}")
         return None, []
 
-def fetch_participant_data(user_links, progress_bar, progress_text):
+def fetch_participant_data(user_links, progress_bar=None, progress_text=None):
     """
     Fetch data for each participant including their LinkedIn URL using parallel processing
     
     Args:
         user_links (set): Set of Lu.ma user profile URLs
-        progress_bar: Streamlit progress bar
-        progress_text: Streamlit text element for updates
+        progress_bar: Optional Streamlit progress bar
+        progress_text: Optional Streamlit text element for updates
         
     Returns:
         list: List of participant data dictionaries
@@ -342,8 +318,9 @@ def fetch_participant_data(user_links, progress_bar, progress_text):
         return participants
     
     # Calculate progress increment per participant
-    progress_increment = 0.5 / len(user_links)
-    current_progress = 0.5  # Start from 50%
+    if progress_bar:
+        progress_increment = 0.5 / len(user_links)
+        current_progress = 0.5  # Start from 50%
     
     # Use ThreadPoolExecutor for parallel fetching
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -353,9 +330,11 @@ def fetch_participant_data(user_links, progress_bar, progress_text):
         # Process results as they complete
         for i, future in enumerate(as_completed(future_to_url)):
             url = future_to_url[future]
-            current_progress += progress_increment
-            progress_bar.progress(min(current_progress, 1.0))
-            progress_text.text(f"Processing participant {i+1}/{len(user_links)}")
+            if progress_bar:
+                current_progress += progress_increment
+                progress_bar.progress(min(current_progress, 1.0))
+            if progress_text:
+                progress_text.text(f"Processing participant {i+1}/{len(user_links)}")
             
             # Basic participant data
             participant = {
@@ -365,7 +344,7 @@ def fetch_participant_data(user_links, progress_bar, progress_text):
             }
             
             # Extract user ID from URL
-            user_id_match = re.search(r'user/(usr-[a-zA-Z0-9]+)', url)
+            user_id_match = re.search(r'user/([\w-]+)', url)
             if user_id_match:
                 user_id = user_id_match.group(1)
                 participant["user_id"] = user_id
@@ -377,7 +356,7 @@ def fetch_participant_data(user_links, progress_bar, progress_text):
                     participant["linkedin_url"] = result.get('linkedin_url')
                     participant["name"] = result.get('name')
             except Exception as e:
-                st.error(f"Error processing {url}: {str(e)}")
+                logger.error(f"Error processing {url}: {str(e)}")
             
             participants.append(participant)
     
@@ -426,16 +405,20 @@ def create_formatted_csv(events_data, all_participants):
     df = pd.DataFrame(rows)
     
     # Add sequence numbers
-    df.insert(0, 'No.', range(1, len(df) + 1))
+    if not df.empty:
+        df.insert(0, 'No.', range(1, len(df) + 1))
     
     # Convert to CSV string
     output = io.StringIO()
     output.write("\n".join(metadata))
-    df.to_csv(output, index=False)
+    if not df.empty:
+        df.to_csv(output, index=False)
+    else:
+        output.write("No data available")
     
     return output.getvalue()
 
-def get_download_link(csv_string, filename="bhive_events_data.csv"):
+def get_download_link(csv_string, filename="luma_events_data.csv"):
     """
     Generate a download link for the CSV data
     
@@ -451,6 +434,8 @@ def get_download_link(csv_string, filename="bhive_events_data.csv"):
     return href
 
 def main():
+    logger.info("Starting Lu.ma event scraper")
+    
     # Header
     st.markdown("<h1>BHIVE Events Data Extractor</h1>", unsafe_allow_html=True)
     
@@ -475,6 +460,7 @@ def main():
     with st.expander("Advanced Options"):
         max_participants = st.slider("Maximum participants to process per event", 1, 100, 50)
         include_description = st.checkbox("Include event descriptions in output", value=False)
+        process_all_calendar_events = st.checkbox("Process all events from calendar page", value=True)
     
     # Extract button
     if st.button("🚀 Extract Event Data"):
@@ -483,36 +469,61 @@ def main():
         progress_text = st.empty()
         
         progress_text.text("Starting extraction process...")
+        logger.info(f"Fetching URL: {url}")
         
-        # Process the event
+        # Process the event(s)
         events_data = []
         all_participants = {}
         
-        # Extract event data
-        event_data, user_links = extract_event_data(url, progress_bar, progress_text)
+        # Check if it's a calendar page and extract event links
+        event_urls = [url]  # Default to just the provided URL
         
-        if event_data and user_links:
-            events_data.append(event_data)
+        if process_all_calendar_events and "START_by_BHIVE" in url:
+            # This is likely a calendar page, extract all event links
+            calendar_event_links = extract_event_links_from_calendar(url, progress_text)
+            if calendar_event_links:
+                event_urls = calendar_event_links
+                progress_text.text(f"Extracted {len(event_urls)} event links")
+        
+        # Process each event
+        total_events = len(event_urls)
+        for i, event_url in enumerate(event_urls):
+            progress_text.text(f"Processing event {i+1}/{total_events}: {event_url}")
+            logger.info(f"Processing event: {event_url}")
             
-            # Limit participants if needed
-            if len(user_links) > max_participants:
-                progress_text.text(f"Limiting to {max_participants} out of {len(user_links)} participants")
-                user_links = list(user_links)[:max_participants]
+            # Extract event data
+            event_data, user_links = extract_event_data(event_url, progress_bar, progress_text)
             
-            # Fetch participant data
-            participants = fetch_participant_data(user_links, progress_bar, progress_text)
-            all_participants[url] = participants
+            if event_data and user_links:
+                events_data.append(event_data)
+                
+                # Limit participants if needed
+                if len(user_links) > max_participants:
+                    progress_text.text(f"Limiting to {max_participants} out of {len(user_links)} participants")
+                    user_links = list(user_links)[:max_participants]
+                
+                # Fetch participant data
+                participants = fetch_participant_data(user_links, progress_bar, progress_text)
+                all_participants[event_url] = participants
             
-            # Calculate success rate
-            linkedin_count = sum(1 for p in participants if p.get("linkedin_url"))
-            success_rate = linkedin_count / len(participants) if participants else 0
-            
-            # Show results
+            # Update overall progress
+            progress_bar.progress((i + 1) / total_events)
+        
+        # Show results
+        if events_data:
             progress_bar.progress(1.0)
             progress_text.text("Extraction complete! Preparing data...")
             
-            st.success(f"✅ Successfully extracted event data!\n\n"
-                     f"Found: {len(participants)} participants\n"
+            # Calculate overall stats
+            total_participants = sum(len(participants) for participants in all_participants.values())
+            linkedin_count = sum(
+                1 for participants in all_participants.values() 
+                for p in participants if p.get("linkedin_url")
+            )
+            success_rate = linkedin_count / total_participants if total_participants else 0
+            
+            st.success(f"✅ Successfully extracted data from {len(events_data)} events!\n\n"
+                     f"Found: {total_participants} total participants\n"
                      f"LinkedIn profiles found: {linkedin_count} ({success_rate:.1%})")
             
             # Display results in tabs
@@ -541,9 +552,10 @@ def main():
                     # Create CSV and download link
                     csv_string = create_formatted_csv(events_data, all_participants)
                     st.markdown(
-                        get_download_link(csv_string, f"bhive_events_{datetime.now().strftime('%Y%m%d')}.csv"),
+                        get_download_link(csv_string, f"luma_events_data.csv"),
                         unsafe_allow_html=True
                     )
+                    logger.info(f"✅ Exported {len(display_data)} records to luma_events_data.csv")
                 else:
                     st.warning("No data available to display.")
             
@@ -559,11 +571,13 @@ def main():
                         st.write("**Description:**")
                         st.write(event["event_description"])
         else:
-            st.error("Failed to extract data from the provided URL. Please check the URL and try again.")
+            st.error("Failed to extract data from the provided URL(s). Please check the URL and try again.")
+        
+        logger.info("Scraping completed")
     
     # Footer
     st.markdown("<hr>", unsafe_allow_html=True)
     st.markdown('<div class="footer">© 2024 Hidevs Internship Program | Created with ❤️ by Hidevs Team</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
-    main() 
+    main()
