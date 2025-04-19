@@ -1,150 +1,371 @@
+"""
+Batch Lu.ma Event Data Extractor
 
-import requests
-from bs4 import BeautifulSoup
+This script extracts data from multiple Lu.ma event pages and compiles all the information into a single CSV file.
+For each event, it extracts:
+1. Event details (name, date, description)
+2. Participant profiles
+3. LinkedIn URLs for each participant by visiting their Lu.ma profile pages
+
+The final output is a comprehensive CSV file with all events and participants.
+"""
+
 import csv
-import time
-import logging
+import json
+import re
 import os
-from typing import Dict, List, Optional, Any
-from urllib.parse import urljoin
+from urllib.parse import urlparse, parse_qs
+from langchain_community.document_loaders import RecursiveUrlLoader
+from bs4 import BeautifulSoup
+import requests
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+import pandas as pd
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-)
-logger = logging.getLogger(__name__)
+# Cache to avoid fetching the same profile multiple times
+linkedin_cache = {}
 
-# Configuration
-BASE_URL = "https://lu.ma/START_by_BHIVE"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
-OUTPUT_FILE = "luma_events_data.csv"
-REQUEST_DELAY = 2  # Seconds between requests
-MAX_RETRIES = 3
+def clean_url(url):
+    """
+    Clean a URL by removing query parameters
+    """
+    parsed = urlparse(url)
+    # Keep only the path
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
-def get_page_content(url: str, retry_count: int = 0) -> Optional[str]:
+def get_linkedin_url_from_luma_user(user_url):
+    """
+    Fetch the LinkedIn URL from a Lu.ma user profile page with caching
+    
+    Args:
+        user_url (str): The Lu.ma user profile URL
+        
+    Returns:
+        str: LinkedIn URL if found, otherwise None
+    """
+    # Clean the URL to avoid duplicates in cache
+    clean_user_url = clean_url(user_url)
+    
+    # Check cache first
+    if clean_user_url in linkedin_cache:
+        return linkedin_cache[clean_user_url]
+    
     try:
-        logger.info(f"Fetching URL: {url}")
-        response = requests.get(url, headers=HEADERS, timeout=30)
-        time.sleep(REQUEST_DELAY)
-        if response.status_code == 200:
-            return response.text
-        else:
-            logger.warning(f"Failed to fetch {url}, status code: {response.status_code}")
-            if retry_count < MAX_RETRIES:
-                logger.info(f"Retrying... (Attempt {retry_count + 1}/{MAX_RETRIES})")
-                time.sleep(REQUEST_DELAY * 2)
-                return get_page_content(url, retry_count + 1)
+        # Make request to the user profile page
+        response = requests.get(clean_user_url)
+        if response.status_code != 200:
+            print(f"Failed to fetch user profile: {clean_user_url} (Status: {response.status_code})")
+            linkedin_cache[clean_user_url] = None
             return None
+        
+        # Parse HTML content
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Try to get user name
+        user_name = None
+        name_elem = soup.select_one('h1.text-2xl') or soup.select_one('h2.font-bold')
+        if name_elem:
+            user_name = name_elem.text.strip()
+        
+        # Look for LinkedIn links (regular expression pattern)
+        linkedin_pattern = re.compile(r'https?://(www\.)?linkedin\.com/[^\s"\'<>]+')
+        
+        # First try to find LinkedIn links in anchor tags
+        linkedin_url = None
+        for a_tag in soup.find_all('a'):
+            href = a_tag.get('href', '')
+            if linkedin_pattern.match(href):
+                linkedin_url = href
+                break
+        
+        # If not found in anchor tags, look in the entire HTML
+        if not linkedin_url:
+            matches = linkedin_pattern.findall(response.text)
+            if matches:
+                linkedin_url = matches[0]  # Return the first match
+        
+        # Store in cache
+        result = {
+            'linkedin_url': linkedin_url,
+            'name': user_name
+        }
+        linkedin_cache[clean_user_url] = result
+        return result
+        
     except Exception as e:
-        logger.error(f"Error fetching {url}: {str(e)}")
-        if retry_count < MAX_RETRIES:
-            logger.info(f"Retrying... (Attempt {retry_count + 1}/{MAX_RETRIES})")
-            time.sleep(REQUEST_DELAY * 2)
-            return get_page_content(url, retry_count + 1)
+        print(f"Error fetching LinkedIn from {clean_user_url}: {str(e)}")
+        linkedin_cache[clean_user_url] = None
         return None
 
-def get_event_links(html_content: str) -> List[str]:
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
-        event_links = []
-        for a_tag in soup.select("a.event-link.content-link[href]"):
-            href = a_tag["href"]
-            full_url = urljoin("https://lu.ma", href)
-            event_links.append(full_url)
-        logger.info(f"Extracted {len(event_links)} event links")
-        return list(set(event_links))
-    except Exception as e:
-        logger.error(f"Error extracting event links: {str(e)}")
-        return []
+def extract_event_data(content, event_url):
+    """
+    Extract event details from the HTML content
+    
+    Args:
+        content (str): The HTML content of the event page
+        event_url (str): The event URL
+        
+    Returns:
+        dict: Event details and set of user links
+    """
+    soup = BeautifulSoup(content, 'html.parser')
+    
+    # Initialize event data
+    event_data = {
+        "event_url": event_url,
+        "event_id": urlparse(event_url).path.strip('/'),
+        "event_name": "Unknown Event",
+        "event_date": None,
+        "event_description": None,
+        "participant_count": 0
+    }
+    
+    # Extract event name (usually the largest heading)
+    event_name_elem = soup.select_one('h1') or soup.select_one('h2.text-2xl') or soup.select_one('.text-3xl')
+    if event_name_elem:
+        event_data["event_name"] = event_name_elem.text.strip()
+    
+    # Extract event date (usually found in a time element or text with date format)
+    date_elem = soup.select_one('time') or soup.select_one('p:contains("202")')
+    if date_elem:
+        event_data["event_date"] = date_elem.text.strip()
+    
+    # Extract event description
+    desc_elem = soup.select_one('div.whitespace-pre-wrap') or soup.select_one('p.text-gray-600')
+    if desc_elem:
+        event_data["event_description"] = desc_elem.text.strip()
+    
+    # Extract participant information
+    # Look for user profile links that match Lu.ma user pattern
+    user_pattern = re.compile(r'https?://(www\.)?lu\.ma/user/[^\s"\'<>]+')
+    
+    user_links = set()  # Use a set to avoid duplicates
+    
+    # Find all links in the page
+    for a_tag in soup.find_all('a'):
+        href = a_tag.get('href', '')
+        if user_pattern.match(href):
+            user_links.add(href)
+    
+    # Also search in the raw HTML for any user links that might not be in <a> tags
+    for match in user_pattern.finditer(content):
+        user_links.add(match.group(0))
+    
+    # Update participant count
+    event_data["participant_count"] = len(user_links)
+    
+    print(f"Event: {event_data['event_name']} - Found {len(user_links)} participant profiles")
+    
+    return event_data, user_links
 
-def get_host_info(event_url: str) -> Dict[str, str]:
-    try:
-        html_content = get_page_content(event_url)
-        if not html_content:
-            return {"Event Name": "Error", "Host Name": "Error", "LinkedIn URL": "Error"}
+def fetch_participant_data(user_links, max_workers=5):
+    """
+    Fetch data for each participant including their LinkedIn URL using parallel processing
+    
+    Args:
+        user_links (set): Set of Lu.ma user profile URLs
+        max_workers (int): Maximum number of parallel workers
+        
+    Returns:
+        list: List of participant data dictionaries
+    """
+    participants = []
+    
+    # Use ThreadPoolExecutor for parallel fetching
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Start the fetching tasks
+        future_to_url = {executor.submit(get_linkedin_url_from_luma_user, url): url for url in user_links}
+        
+        # Process results as they complete
+        for i, future in enumerate(as_completed(future_to_url)):
+            url = future_to_url[future]
+            print(f"Processing participant {i+1}/{len(user_links)}")
+            
+            # Basic participant data
+            participant = {
+                "luma_profile": url,
+                "name": None,
+                "linkedin_url": None
+            }
+            
+            # Extract user ID from URL
+            user_id_match = re.search(r'user/(usr-[a-zA-Z0-9]+)', url)
+            if user_id_match:
+                user_id = user_id_match.group(1)
+                participant["user_id"] = user_id
+            
+            # Get result from future
+            try:
+                result = future.result()
+                if result:
+                    participant["linkedin_url"] = result.get('linkedin_url')
+                    participant["name"] = result.get('name')
+            except Exception as e:
+                print(f"Error processing {url}: {str(e)}")
+            
+            participants.append(participant)
+    
+    return participants
 
-        soup = BeautifulSoup(html_content, 'html.parser')
+def process_event(event_url):
+    """
+    Process a single event URL to extract all data
+    
+    Args:
+        event_url (str): The event URL
+        
+    Returns:
+        tuple: (event_data, participants)
+    """
+    print(f"\nProcessing event: {event_url}")
+    
+    # Initialize the RecursiveUrlLoader
+    loader = RecursiveUrlLoader(
+        event_url,
+        max_depth=1,
+        use_async=False,
+        timeout=15,
+        check_response_status=True,
+        continue_on_failure=True
+    )
+    
+    # Load documents
+    docs = []
+    docs_lazy = loader.lazy_load()
+    
+    for doc in docs_lazy:
+        docs.append(doc)
+    
+    if not docs:
+        print(f"Failed to load content for {event_url}")
+        return None, []
+    
+    # Extract event data and participant links
+    event_data, user_links = extract_event_data(docs[0].page_content, event_url)
+    
+    # Fetch data for each participant
+    print(f"Fetching LinkedIn profiles for {len(user_links)} participants...")
+    participants = fetch_participant_data(user_links)
+    
+    return event_data, participants
 
-        # Get Event Title
-        event_name = soup.find("h1")
-        event_name = event_name.text.strip() if event_name else "N/A"
-
-        # Find host block
-        host_anchors = soup.select("div.content-card a[href^='/user/']")
-        if not host_anchors:
-            logger.warning(f"No hosts found on {event_url}")
-            return {"Event Name": event_name, "Host Name": "N/A", "LinkedIn URL": "N/A"}
-
-        host_anchor = host_anchors[0]
-        host_name = host_anchor.text.strip()
-        host_relative_url = host_anchor['href']
-        host_url = urljoin("https://lu.ma", host_relative_url)
-
-        # Get LinkedIn from host page
-        linkedin_url = "N/A"
-        host_page = get_page_content(host_url)
-        if host_page:
-            host_soup = BeautifulSoup(host_page, 'html.parser')
-            linkedin_anchor = host_soup.find('a', href=lambda href: href and 'linkedin.com' in href.lower())
-            if linkedin_anchor:
-                linkedin_url = linkedin_anchor['href']
-
-        return {
-            "Event Name": event_name,
-            "Host Name": host_name,
-            "LinkedIn URL": linkedin_url
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting host info for {event_url}: {str(e)}")
-        return {"Event Name": f"Error: {str(e)}", "Host Name": "Error", "LinkedIn URL": "Error"}
-
-def scrape_all_events() -> List[Dict[str, str]]:
-    all_data = []
-    html_content = get_page_content(BASE_URL)
-    if not html_content:
-        logger.error(f"Could not fetch the main page: {BASE_URL}")
-        return all_data
-    event_links = get_event_links(html_content)
-    if not event_links:
-        logger.error("No event links found")
-        return all_data
-    for event_url in event_links:
-        try:
-            logger.info(f"Processing event: {event_url}")
-            info = get_host_info(event_url)
-            info["Event URL"] = event_url
-            all_data.append(info)
-        except Exception as e:
-            logger.error(f"Error processing event {event_url}: {str(e)}")
-        time.sleep(REQUEST_DELAY)
-    return all_data
-
-def export_to_csv(data: List[Dict[str, str]], filename: str = OUTPUT_FILE) -> None:
-    if not data:
-        logger.warning("No data to export")
-        return
-    keys = ["Event Name", "Event URL", "Host Name", "LinkedIn URL"]
-    try:
-        with open(filename, mode='w', newline='', encoding='utf-8') as file:
-            writer = csv.DictWriter(file, fieldnames=keys)
-            writer.writeheader()
-            writer.writerows(data)
-        logger.info(f"✅ Exported {len(data)} records to {filename}")
-    except Exception as e:
-        logger.error(f"Error exporting to CSV: {str(e)}")
+def save_to_csv(events_data, all_participants, filename="luma_events_data.csv"):
+    """
+    Save all event data and participants to a single CSV file
+    
+    Args:
+        events_data (list): List of event details dictionaries
+        all_participants (dict): Dictionary mapping event URLs to participant lists
+        filename (str): Output filename
+    """
+    # Define CSV fields
+    fields = [
+        "event_name", "event_url", "event_id", "event_date", 
+        "participant_name", "luma_profile", "linkedin_url"
+    ]
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(filename) if os.path.dirname(filename) else '.', exist_ok=True)
+    
+    # Write to CSV
+    with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fields)
+        writer.writeheader()
+        
+        # For each event, write all participants
+        for event in events_data:
+            event_url = event["event_url"]
+            participants = all_participants.get(event_url, [])
+            
+            for participant in participants:
+                row = {
+                    "event_name": event["event_name"],
+                    "event_url": event["event_url"],
+                    "event_id": event["event_id"],
+                    "event_date": event["event_date"],
+                    "participant_name": participant.get("name", "Unknown"),
+                    "luma_profile": participant["luma_profile"],
+                    "linkedin_url": participant.get("linkedin_url", "")
+                }
+                writer.writerow(row)
+    
+    print(f"\nData saved to {filename}")
+    
+    # Also save the complete data as JSON for reference
+    json_filename = filename.replace(".csv", ".json")
+    complete_data = {
+        "events": events_data,
+        "participants_by_event": all_participants
+    }
+    
+    with open(json_filename, 'w', encoding='utf-8') as f:
+        json.dump(complete_data, f, indent=2)
+    
+    print(f"Complete data saved to {json_filename}")
 
 def main():
-    logger.info("Starting Lu.ma event scraper")
-    data = scrape_all_events()
-    export_to_csv(data)
-    logger.info("Scraping completed")
+    # List of Lu.ma event URLs to process
+    event_urls = [
+        "https://lu.ma/18tw2f7h?tk=2n42Yn",
+        # Add more event URLs as needed
+        # "https://lu.ma/another-event",
+        # "https://lu.ma/third-event",
+    ]
+    
+    print(f"Processing {len(event_urls)} Lu.ma events")
+    
+    # Process each event
+    events_data = []
+    all_participants = {}
+    
+    for event_url in event_urls:
+        event_data, participants = process_event(event_url)
+        
+        if event_data:
+            events_data.append(event_data)
+            all_participants[event_url] = participants
+    
+    # Save all data to CSV
+    save_to_csv(events_data, all_participants)
+    
+    # Print summary
+    print("\nSummary:")
+    print(f"Processed {len(events_data)} events")
+    total_participants = sum(len(participants) for participants in all_participants.values())
+    print(f"Found {total_participants} total participants")
+    linkedin_count = sum(
+        1 for participants in all_participants.values() 
+        for p in participants if p.get("linkedin_url")
+    )
+    print(f"Found {linkedin_count} LinkedIn URLs ({linkedin_count/total_participants*100:.1f}% of participants)")
+
+# Function to create a beautifully formatted CSV
+def get_formatted_csv(df):
+    # Create a CSV string with headers and formatting
+    csv_string = "Hidevs Internship Work - BHIVE Events Data\n"
+    csv_string += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    csv_string += f"Total Records: {len(df)}\n"
+    csv_string += "Source: https://lu.ma/START_by_BHIVE\n\n"
+    
+    # Clean the data before export
+    clean_df = df.copy()
+    
+    # Clean and standardize LinkedIn URLs
+    clean_df['LinkedIn Profile URL'] = clean_df['LinkedIn Profile URL'].apply(
+        lambda x: x if pd.notnull(x) and x.strip() != "" else "Not Available"
+    )
+    
+    # Clean event names and host names
+    clean_df['Event Name'] = clean_df['Event Name'].str.strip()
+    clean_df['Host Name'] = clean_df['Host Name'].str.strip()
+    
+    # Add sequence numbers for better readability
+    clean_df.insert(0, 'No.', range(1, len(clean_df) + 1))
+    
+    # Export to CSV with proper formatting
+    csv_string += clean_df.to_csv(index=False)
+    return csv_string.encode('utf-8')
 
 if __name__ == "__main__":
     main()
